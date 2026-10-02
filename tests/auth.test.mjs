@@ -1,86 +1,74 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {generateKeyPairSync,sign,createHash} from 'node:crypto';
-import {OAuth2Client} from 'google-auth-library';
-import {createAuthApp,readConfig} from '../server/auth.mjs';
-
-const config=readConfig({GOOGLE_CLIENT_ID:'test.apps.googleusercontent.com',GOOGLE_CLIENT_SECRET:'test-only-secret',REFLECT_BASE_URL:'https://reflect.example',REFLECT_ALLOWED_EMAILS:'owner@gmail.com',REFLECT_OWNER_EMAIL:'owner@gmail.com'});
-const keys=generateKeyPairSync('rsa',{modulusLength:2048});
-const publicKey=keys.publicKey.export({type:'spki',format:'pem'});
-const encode=v=>Buffer.from(JSON.stringify(v)).toString('base64url');
-function token(payload){const parts=`${encode({alg:'RS256',typ:'JWT',kid:'test-key'})}.${encode(payload)}`;return `${parts}.${sign('RSA-SHA256',Buffer.from(parts),keys.privateKey).toString('base64url')}`;}
-function harness(){
- let clock=Date.now(),claims={},nonce,challenge,exchanges=0;
- const client=new OAuth2Client(config.clientId,config.clientSecret,`${config.baseUrl}/auth/google/callback`);
- const original=client.generateAuthUrl.bind(client);
- client.generateAuthUrl=options=>{challenge=options.code_challenge;return original(options);};
- client.getFederatedSignonCertsAsync=async()=>({certs:{'test-key':publicKey},format:'PEM'});
- client.getToken=async options=>{
-  exchanges++;assert.equal(options.redirect_uri,`${config.baseUrl}/auth/google/callback`);
-  assert.equal(createHash('sha256').update(options.codeVerifier).digest('base64url'),challenge,'The token exchange uses the original PKCE verifier');
-  const now=Math.floor(Date.now()/1000);
-  return {tokens:{id_token:claims.badSignature?'invalid.signature.value':token({iss:'https://accounts.google.com',aud:config.clientId,iat:now,exp:now+3600,sub:'google-owner-subject',email:'owner@gmail.com',email_verified:true,name:'Planner Owner',nonce,...claims})}};
+import {readConfig,createAuthApp} from '../server/auth.mjs';
+import {ProviderError} from '../server/supabase.mjs';
+import {createDemo} from '../dist/planner.js';
+const env={SUPABASE_URL:'https://project.supabase.co',SUPABASE_PUBLISHABLE_KEY:'sb_publishable_test',REFLECT_BASE_URL:'https://reflect.example'};
+const user={id:'user-one',email:'someone@gmail.com',email_confirmed_at:'2026-10-02T12:00:00Z'};
+const tokens={access_token:'valid-access-token',refresh_token:'valid-refresh-token',expires_in:3600};
+function setup(overrides={}){
+ const calls=[];const provider={
+  signUp:async(...args)=>{calls.push(['signup',...args]);return {};},
+  signIn:async(...args)=>{calls.push(['signin',...args]);return tokens;},
+  user:async token=>{calls.push(['user',token]);return user;},
+  refresh:async token=>{calls.push(['refresh',token]);return tokens;},
+  verify:async(...args)=>{calls.push(['verify',...args]);return tokens;},
+  resend:async email=>{calls.push(['resend',email]);},
+  recover:async email=>{calls.push(['recover',email]);},
+  updatePassword:async(...args)=>{calls.push(['password',...args]);},
+  logout:async token=>{calls.push(['logout',token]);},
+  workspace:async(...args)=>{calls.push(['workspace',...args]);return {state:null,revision:0};},
+  save:async(...args)=>{calls.push(['save',...args]);return {revision:args[3]+1};},...overrides
  };
- const handle=createAuthApp(config,{oauth:client,now:()=>clock});
- const request=(path,options={})=>handle(new Request(`${config.baseUrl}${path}`,options));
- return {request,setClaims:value=>{claims=value;},advance:ms=>{clock+=ms;},exchanges:()=>exchanges,async start(){const response=await request('/auth/google/start');const url=new URL(response.headers.get('location'));nonce=url.searchParams.get('nonce');return {response,url,state:url.searchParams.get('state'),cookie:response.headers.get('set-cookie').split(';')[0]};},async finish(start,extra=''){return request(`/auth/google/callback?state=${start.state}&code=test-code${extra}`,{headers:{cookie:start.cookie}});}};
+ return {handle:createAuthApp(readConfig(env),{provider}),calls,provider};
 }
-test('Config refuses missing credentials, public allowlists, and insecure production origins',()=>{
- assert.throws(()=>readConfig({}),/GOOGLE_CLIENT_ID/);
- for(const change of [{REFLECT_ALLOWED_EMAILS:''},{REFLECT_ALLOWED_EMAILS:'*@gmail.com'},{REFLECT_BASE_URL:'http://reflect.example'},{REFLECT_BASE_URL:'https://reflect.example/path'}])assert.throws(()=>readConfig({GOOGLE_CLIENT_ID:'id',GOOGLE_CLIENT_SECRET:'secret',REFLECT_BASE_URL:config.baseUrl,REFLECT_ALLOWED_EMAILS:'owner@gmail.com',...change}));
- assert.equal(readConfig({GOOGLE_CLIENT_ID:'id',GOOGLE_CLIENT_SECRET:'secret',REFLECT_BASE_URL:'http://localhost:3000',REFLECT_ALLOWED_EMAILS:'owner@gmail.com'}).secure,false);
+function request(path,{method='GET',body,cookie,origin='https://reflect.example',json=false}={}){
+ return new Request('https://reflect.example'+path,{method,headers:{...(cookie?{cookie}:{}),...(method==='GET'?{}:{origin,'content-type':json?'application/json':'application/x-www-form-urlencoded'})},...(body!==undefined?{body:json?JSON.stringify(body):new URLSearchParams(body).toString()}:{})});
+}
+const signed='__Host-reflect-access=valid-access-token; __Host-reflect-refresh=valid-refresh-token';
+test('Configuration accepts open Gmail registration and fails closed on unsafe keys/origins',()=>{
+ assert.equal(readConfig(env).secure,true);assert.equal(readConfig({...env,RENDER_EXTERNAL_URL:env.REFLECT_BASE_URL,REFLECT_BASE_URL:''}).baseUrl,env.REFLECT_BASE_URL);
+ for(const bad of [{SUPABASE_PUBLISHABLE_KEY:'sb_secret_x'},{SUPABASE_URL:'http://example.com'},{REFLECT_BASE_URL:'https://example.com/path'},{REFLECT_OWNER_EMAIL:'owner@example.com'}])assert.throws(()=>readConfig({...env,...bad}));
+ const legacy=['e30',Buffer.from(JSON.stringify({role:'anon'})).toString('base64url'),'sig'].join('.');assert.equal(readConfig({...env,SUPABASE_PUBLISHABLE_KEY:legacy}).supabaseKey,legacy);
 });
-test('Render supplies the default callback origin and an explicit custom domain takes precedence',()=>{
- const env={GOOGLE_CLIENT_ID:'id',GOOGLE_CLIENT_SECRET:'secret',RENDER_EXTERNAL_URL:'https://reflect-test.onrender.com',REFLECT_ALLOWED_EMAILS:'owner@gmail.com'};
- assert.equal(readConfig(env).baseUrl,'https://reflect-test.onrender.com');
- assert.equal(readConfig({...env,REFLECT_BASE_URL:'https://goals.example.com'}).baseUrl,'https://goals.example.com');
- assert.throws(()=>readConfig({...env,RENDER_EXTERNAL_URL:'http://unsafe.example'}),/HTTPS/);
+test('Signup form has only Gmail and preferred password; old OAuth routes are gone',async()=>{
+ const {handle}=setup();const page=await handle(request('/signup'));const html=await page.text();assert.equal((html.match(/<input /g)||[]).length,2);assert.match(html,/name="email"/);assert.match(html,/name="password"/);assert.doesNotMatch(html,/Continue with Google|oauth/i);
+ assert.equal((await handle(request('/auth/google/start'))).status,404);assert.equal((await handle(request('/auth/google/callback'))).status,404);
 });
-test('Private planner and script assets are unavailable without a session',async()=>{
- const h=harness();for(const path of ['/','/index.html','/app.js','/planner.js']){const r=await h.request(path);assert.equal(r.status,303);assert.equal(r.headers.get('location'),'/login');}
- const r=await h.request('/api/session');assert.equal(r.status,401);assert.deepEqual(await r.json(),{signedIn:false});
- const login=await h.request('/login');assert.match(await login.text(),/Continue with Google/);assert.match(login.headers.get('content-security-policy'),/frame-ancestors 'none'/);
+test('Any Gmail can register, verification is requested, and other email domains are rejected',async()=>{
+ const {handle,calls}=setup();const response=await handle(request('/auth/signup',{method:'POST',body:{email:'NewPerson@gmail.com',password:'personal-password'}}));assert.equal(response.status,303);assert.equal(response.headers.get('location'),'/login?message=confirmation');assert.deepEqual(calls[0],['signup','newperson@gmail.com','personal-password']);assert.ok(response.headers.getSetCookie().every(v=>v.includes('Max-Age=0')));
+ assert.equal((await handle(request('/auth/signup',{method:'POST',body:{email:'someone@example.com',password:'personal-password'}}))).status,403);
+ assert.equal((await handle(request('/auth/signup',{method:'POST',body:{email:'someone@gmail.com',password:'short'}}))).status,400);
 });
-test('Google authorization uses identity-only scopes, PKCE, state, nonce, and secure cookies',async()=>{
- const h=harness(),s=await h.start();assert.equal(s.response.status,303);assert.equal(s.url.origin,'https://accounts.google.com');assert.deepEqual(new Set(s.url.searchParams.get('scope').split(' ')),new Set(['openid','email','profile']));
- assert.equal(s.url.searchParams.get('code_challenge_method'),'S256');assert.ok(s.url.searchParams.get('nonce'));assert.ok(s.url.searchParams.get('state'));assert.equal(s.url.searchParams.get('redirect_uri'),`${config.baseUrl}/auth/google/callback`);
- const cookie=s.response.headers.get('set-cookie');assert.match(cookie,/__Host-reflect-login=/);assert.match(cookie,/HttpOnly/);assert.match(cookie,/Secure/);assert.match(cookie,/SameSite=Lax/);assert.doesNotMatch(cookie,/Domain=/);
+test('Login validates identity with Supabase and stores credentials only in secure HttpOnly cookies',async()=>{
+ const {handle}=setup();const response=await handle(request('/auth/login',{method:'POST',body:{email:user.email,password:'preferred-password'}}));assert.equal(response.status,303);assert.equal(response.headers.get('location'),'/');assert.equal(response.headers.getSetCookie().length,2);for(const cookie of response.headers.getSetCookie()){assert.match(cookie,/^__Host-reflect-/);assert.match(cookie,/HttpOnly; SameSite=Lax/);assert.match(cookie,/Secure/);}
+ const root=await handle(request('/',{cookie:signed}));const html=await root.text();assert.match(html,/id="reflect-account"/);assert.match(html,/id="reflect-workspace"/);assert.doesNotMatch(html,/valid-access-token|valid-refresh-token|preferred-password/);
+ const restart=setup();assert.equal((await restart.handle(request('/',{cookie:signed}))).status,200,'Session survives a server restart');
 });
-test('Approved Google token creates a protected, account-specific workspace session',async()=>{
- const h=harness(),s=await h.start(),r=await h.finish(s);assert.equal(r.status,303);assert.equal(r.headers.get('location'),'/');
- const sessionCookie=r.headers.getSetCookie().find(v=>v.startsWith('__Host-reflect-session=')).split(';')[0];assert.ok(sessionCookie);assert.equal(h.exchanges(),1);
- const identity=await h.request('/api/session',{headers:{cookie:sessionCookie}});const body=await identity.json();assert.equal(body.user.id,'google-owner-subject');assert.equal(body.user.email,'owner@gmail.com');assert.equal(body.user.legacyOwner,true);
- const page=await h.request('/',{headers:{cookie:sessionCookie}});assert.equal(page.status,200);assert.match(await page.text(),/id="reflect-account"/);assert.equal(page.headers.get('cache-control'),'no-store');
- const assets=await h.request('/app.js',{headers:{cookie:sessionCookie}});assert.equal(assets.status,200);assert.match(await assets.text(),/googleAccount/);
- const replay=await h.finish(s);assert.match(replay.headers.get('location'),/error=expired/);assert.equal(h.exchanges(),1);
+test('Unverified users, invalid passwords, and forged cookies cannot open the planner',async()=>{
+ assert.equal((await setup({user:async()=>({...user,email_confirmed_at:null})}).handle(request('/',{cookie:signed}))).status,303);
+ assert.equal((await setup({signIn:async()=>{throw new ProviderError(400);}}).handle(request('/auth/login',{method:'POST',body:{email:user.email,password:'wrong'}}))).status,400);
+ const {handle}=setup({user:async()=>{throw new ProviderError(401);},refresh:async()=>{throw new ProviderError(400);}});assert.equal((await handle(request('/api/workspace',{cookie:signed}))).status,401);
 });
-test('State, browser cookie, expiry, cancellation and nonce errors never create a session',async()=>{
- for(const mode of ['state','cookie','expiry','denied','nonce','unicode']){
-  const h=harness(),s=await h.start();let r;
-  if(mode==='state')r=await h.request(`/auth/google/callback?state=wrong&code=x`,{headers:{cookie:s.cookie}});
-  if(mode==='cookie')r=await h.request(`/auth/google/callback?state=${s.state}&code=x`);
-  if(mode==='expiry'){h.advance(11*60*1000);r=await h.finish(s);}
-  if(mode==='denied')r=await h.finish(s,'&error=access_denied');
-  if(mode==='nonce'){h.setClaims({nonce:'wrong-nonce'});r=await h.finish(s);}
-  if(mode==='unicode')r=await h.request(`/auth/google/callback?state=${'é'.repeat(43)}&code=x`,{headers:{cookie:s.cookie}});
-  assert.match(r.headers.get('location'),/\/login\?error=/,mode);assert.ok(!r.headers.getSetCookie().some(v=>v.startsWith('__Host-reflect-session=')),mode);
- }
+test('Expired access tokens refresh persistently and transient provider outages preserve cookies',async()=>{
+ const {handle,calls}=setup({user:async token=>{if(token==='expired-access-token')throw new ProviderError(401);return user;}});
+ const response=await handle(request('/api/session',{cookie:'__Host-reflect-access=expired-access-token; __Host-reflect-refresh=valid-refresh-token'}));assert.equal(response.status,200);assert.equal(response.headers.getSetCookie().length,2);assert.ok(calls.some(v=>v[0]==='refresh'));
+ const outage=await setup({user:async()=>{throw new Error('network unavailable');}}).handle(request('/api/workspace',{cookie:signed}));assert.equal(outage.status,503);assert.equal(outage.headers.getSetCookie().length,0);
 });
-test('Real Google library signature, audience, issuer, and expiry verification rejects invalid tokens',async()=>{
- const now=Math.floor(Date.now()/1000);
- for(const change of [{badSignature:true},{aud:'different-client'},{iss:'https://untrusted.example'},{exp:now-1000},{email_verified:false},{email:'outsider@gmail.com'}]){
-  const h=harness(),s=await h.start();h.setClaims(change);const r=await h.finish(s);assert.match(r.headers.get('location'),/\/login\?error=/);assert.ok(!r.headers.getSetCookie().some(v=>v.startsWith('__Host-reflect-session=')));
- }
+test('Confirmation links require a POST and reset links select a new password without auto-login',async()=>{
+ const hash='a'.repeat(64),{handle,calls}=setup();assert.equal((await handle(request('/auth/confirm?token_hash='+hash))).status,200);assert.equal(calls.length,0,'Email scanners do not consume tokens');
+ const confirmed=await handle(request('/auth/confirm',{method:'POST',body:{token_hash:hash}}));assert.equal(confirmed.headers.get('location'),'/login?message=confirmed');assert.deepEqual(calls[0],['verify',hash,'email']);
+ const reset=await handle(request('/auth/reset',{method:'POST',body:{token_hash:hash,password:'my-new-password'}}));assert.equal(reset.headers.get('location'),'/login?message=reset');assert.ok(calls.some(v=>v[0]==='verify'&&v[2]==='recovery'));assert.ok(calls.some(v=>v[0]==='password'&&v[2]==='my-new-password'));
+ const resent=await handle(request('/auth/resend',{method:'POST',body:{email:user.email}}));assert.equal(resent.headers.get('location'),'/login?message=confirmation');assert.ok(calls.some(v=>v[0]==='resend'));
+ const recover=await handle(request('/auth/recover',{method:'POST',body:{email:user.email}}));assert.equal(recover.headers.get('location'),'/login?message=recovery');
 });
-test('Logout requires a same-origin POST and revokes the session',async()=>{
- const h=harness(),s=await h.start(),r=await h.finish(s),cookie=r.headers.getSetCookie().find(v=>v.startsWith('__Host-reflect-session=')).split(';')[0];
- const get=await h.request('/auth/logout',{headers:{cookie}});assert.equal(get.status,405);
- const foreign=await h.request('/auth/logout',{method:'POST',headers:{cookie,origin:'https://untrusted.example'}});assert.equal(foreign.status,403);
- const ok=await h.request('/auth/logout',{method:'POST',headers:{cookie,origin:config.baseUrl}});assert.equal(ok.status,303);assert.match(ok.headers.get('set-cookie'),/Max-Age=0/);
- assert.equal((await h.request('/api/session',{headers:{cookie}})).status,401);
+test('Mutating requests require exact origin and logout clears both cookies',async()=>{
+ const {handle,calls}=setup();for(const path of ['/auth/signup','/auth/login','/auth/logout','/auth/reset'])assert.equal((await handle(request(path,{method:'POST',body:{},origin:'https://evil.example'}))).status,403);
+ const response=await handle(request('/auth/logout',{method:'POST',cookie:signed}));assert.equal(response.status,303);assert.equal(response.headers.getSetCookie().length,2);assert.ok(calls.some(v=>v[0]==='logout'));
 });
-test('Session expires and HTML bootstrap escapes user-controlled profile text',async()=>{
- const h=harness(),s=await h.start();h.setClaims({name:'</script><script>alert(1)</script>'});const r=await h.finish(s),cookie=r.headers.getSetCookie().find(v=>v.startsWith('__Host-reflect-session=')).split(';')[0];
- const html=await(await h.request('/',{headers:{cookie}})).text();assert.doesNotMatch(html,/<script>alert\(1\)<\/script>/);assert.match(html,/\\u003c\/script>/);
- h.advance(9*60*60*1000);assert.equal((await h.request('/api/session',{headers:{cookie}})).status,401);
+test('Workspace API derives owner from the validated session, rejects invalid state, and returns write conflicts',async()=>{
+ const {handle,calls}=setup();const state=createDemo();const response=await handle(request('/api/workspace',{method:'PUT',cookie:signed,json:true,body:{state,revision:0,user_id:'victim-id'}}));assert.equal(response.status,200);assert.equal(calls.find(v=>v[0]==='save')[2],user.id);
+ assert.equal((await handle(request('/api/workspace',{method:'PUT',cookie:signed,json:true,body:{state:{bad:true},revision:0}}))).status,400);
+ assert.equal((await handle(request('/api/workspace',{method:'PUT',cookie:signed,json:true,body:{state,revision:-1}}))).status,400);
+ const conflict=await setup({save:async()=>{throw new ProviderError(409);}}).handle(request('/api/workspace',{method:'PUT',cookie:signed,json:true,body:{state,revision:1}}));assert.equal(conflict.status,409);
 });
