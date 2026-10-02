@@ -1,5 +1,4 @@
-# Deploy this repository as a Render Blueprint after configuring Google OAuth.
-# Credentials are entered in Render, not committed to this file.
+# Configure Supabase first; see SUPABASE.md and RENDER.md.
 services:
   - type: web
     name: reflect-ai
@@ -13,14 +12,10 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: GOOGLE_CLIENT_ID
+      - key: SUPABASE_URL
         sync: false
-      - key: GOOGLE_CLIENT_SECRET
-        sync: false
-      - key: REFLECT_ALLOWED_EMAILS
+      - key: SUPABASE_PUBLISHABLE_KEY
         sync: false
       - key: REFLECT_OWNER_EMAIL
         value: ""
-
-# REFLECT_BASE_URL is optional on Render. The server uses Render's provided
-# RENDER_EXTERNAL_URL automatically. Set REFLECT_BASE_URL if using a custom domain.
+# Uses RENDER_EXTERNAL_URL automatically. Set REFLECT_BASE_URL for a custom domain.

@@ -1,39 +1,55 @@
 # Reflect AI
 
-A private personal planning prototype with a single active goal, realistic workday scheduling, daily actions, and a goal-specific reflection journal.
+A goal planner with practical scheduling, today's actions, motivation, and weekly, monthly, and end-of-goal reflections.
 
-## Host on Render
+Anyone with a Gmail address can create an account using their email and a preferred Reflect AI password. Supabase manages authentication and stores each account's private workspace. Email ownership must be confirmed before accessing the planner.
 
-Use the included `render.yaml` Blueprint and follow [RENDER.md](RENDER.md). It runs the Node server with direct Google login. Set your Google OAuth credentials and approved email addresses in Render; real secrets are not included in this repository.
+## Set up Supabase and Render
+
+1. Follow [SUPABASE.md](SUPABASE.md) to create the project, run [supabase/schema.sql](supabase/schema.sql), and configure authentication emails.
+2. Follow [RENDER.md](RENDER.md) to host the Node web service from this repository.
+3. Enter environment values in Render. No admin API key or database connection password is required.
+
+The source repository is public as approved. The existing private prototype has not been redeployed by this source change. Deploying the new service is a separate action.
 
 ## Run locally
 
-Use Node.js 24. From the repository root:
+Use Node.js 24:
 
 ```bash
 npm ci
 npm run dev
 ```
 
-Open `http://localhost:3000`. The local static preview needs no build step and runs without authentication. Production `npm start` requires Google OAuth configuration and serves the protected planner. Run `npm test` for the scheduling, authentication, data model, and DOM interaction tests.
+This local preview binds to `127.0.0.1:3000`, uses browser storage, and does not authenticate or access Supabase.
 
-For optional browser tests, install Playwright and Chromium with `npm install --no-save playwright` and `npx playwright install chromium`. Keep `npm run dev` running, then run `npm run test:browser`. Screenshots are written to the ignored `test-results/` folder. Set `REFLECT_TEST_URL` or `REFLECT_TEST_OUTPUT_DIR` to override the defaults. These browser tests run against the static prototype, without Google sign-in.
+To run the full service, copy `.env.example` to `.env`, fill in your Supabase values, set the local redirect URLs/templates described in SUPABASE.md, and run:
+
+```bash
+node --env-file=.env server/start.mjs
+```
+
+`npm start` reads environment variables provided by the host. There is no frontend build step and no runtime npm dependency; the server uses Node's fetch API to call Supabase Auth and PostgREST.
 
 ## Behavior
 
-- Goal setup captures an outcome, a deadline, a reason, workdays, and a daily time budget.
-- Suggested checkpoints and their actions are editable before activation. The scheduler rejects outlines that exceed available capacity and keeps dates within the goal.
-- Today includes scheduled actions and unfinished overdue actions. Completing, editing, adding, and rescheduling actions updates the plan.
-- Weekly, calendar-month, and end-of-goal reflections include a mood, observations, lessons, and an optional next step linked to an action. Updating a linked next step updates its action rather than duplicating it.
-- New goals archive the previous personal goal. Previous goals can be reopened.
-- Progress and streaks use actual action completion records. A 25-minute focus timer is optional.
-- Data is stored in browser localStorage. Export and validated import provide backup and restore. Data does not sync between devices.
-- Planning uses editable templates, not a remote language model. No emails or reminders are sent.
+- Goal setup captures an outcome, deadline, reason, workdays, and daily time budget.
+- Checkpoints and actions are editable before activation. Plans that exceed capacity are rejected with a useful correction.
+- Complete, undo, edit, add, remove, or reschedule actions. Progress, streaks, and a focus timer offer simple motivation.
+- Record weekly, calendar-month, and end-of-goal reflections. A reflection can add one linked next action without duplicating it on edit.
+- One goal is active at a time; previous personal goals are archived and can be restored.
+- Workspaces sync to Supabase with revision checks. Failed saves stay pending in a per-account local backup. Conflicting writes stop; a superseded unsaved version is preserved for download from Settings after reload.
+- Export/import validated JSON backups. Use exports to move existing goals from the old prototype to the new Render origin. Accounts use Supabase user IDs, so backups from earlier authentication accounts are not silently reassigned.
+- The planner uses editable templates, not a remote language model. No AI API key is needed.
 
-## Hosting and privacy
+## Validation
 
-The existing prototype remains privately hosted on Sites. This repository includes the portable Render version, which requires Google sign-in and an explicit list of approved email addresses. The private prototype's provider-specific hosting configuration is excluded from this source export. No credentials belong in this repository. Browser planning data is never included in the deployed source.
+```bash
+npm test
+```
 
-## Direct Google login
+Tests cover scheduling and reflections, signup/login/confirmation/reset/logout, verified Gmail checks, persistent cookie sessions and refresh, ownership derived from the authenticated user, cloud request contracts, serialized saves, conflicts, offline recovery, and actual application DOM interactions. Provider tests use mocks. Live email delivery, Supabase RLS enforcement, and hosted multi-device behavior must be tested after the real project is configured.
 
-A separate Google OAuth server is prepared in `server/`. See [GOOGLE_AUTH.md](GOOGLE_AUTH.md) for configuration and activation. It is not active on the current private Sites URL. The existing ChatGPT gate and its owner-only audience remain in place.
+Optional browser tests: install Playwright with `npm install --no-save playwright`, install Chromium with `npx playwright install chromium`, keep `npm run dev` running, then run `npm run test:browser`. Screenshots go to `test-results/`. Set `REFLECT_TEST_URL` or `REFLECT_TEST_OUTPUT_DIR` to override the defaults. These optional tests exercise the local preview.
+
+Never commit actual `.env` files, passwords, SMTP credentials, refresh tokens, or admin keys.
