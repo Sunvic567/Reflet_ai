@@ -1,0 +1,26 @@
+# Deploy this repository as a Render Blueprint after configuring Google OAuth.
+# Credentials are entered in Render, not committed to this file.
+services:
+  - type: web
+    name: reflect-ai
+    runtime: node
+    plan: free
+    numInstances: 1
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeployTrigger: 'off'
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: REFLECT_ALLOWED_EMAILS
+        sync: false
+      - key: REFLECT_OWNER_EMAIL
+        value: ""
+
+# REFLECT_BASE_URL is optional on Render. The server uses Render's provided
+# RENDER_EXTERNAL_URL automatically. Set REFLECT_BASE_URL if using a custom domain.
