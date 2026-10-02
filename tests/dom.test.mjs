@@ -1,0 +1,62 @@
+import {JSDOM} from 'jsdom';
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import {today,addDays,validateImport} from '../dist/planner.js';
+const html=fs.readFileSync(new URL('../dist/index.html',import.meta.url),'utf8');
+let dom,ticks=[],exports=[];
+const storageKey='reflect-ai-v1';
+function setup(saved){
+ dom=new JSDOM(html,{url:'https://reflect-ai.test/'});
+ const w=dom.window;globalThis.window=w;globalThis.document=w.document;globalThis.localStorage=w.localStorage;
+ w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};
+ w.HTMLElement.prototype.scrollIntoView=function(){};w.scrollTo=()=>{};
+ w.HTMLAnchorElement.prototype.click=function(){exports.push({href:this.href,name:this.download});};
+ globalThis.setInterval=fn=>{ticks.push(fn);return ticks.length;};
+ if(saved)localStorage.setItem(storageKey,JSON.stringify(saved));
+}
+const query=s=>{const e=document.querySelector(s);assert.ok(e,'Element exists: '+s);return e;};
+const click=s=>query(s).click();
+const fill=(s,value)=>{const e=query(s);e.value=String(value);e.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
+const submit=s=>{const form=query(s);assert.equal(form.checkValidity(),true,'Native form constraints pass');form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));};
+const read=()=>JSON.parse(localStorage.getItem(storageKey));
+const act=(action,id)=>`[data-action="${action}"]${id?`[data-id="${id}"]`:''}`;
+const nav=v=>click(`[data-action="nav"][data-view="${v}"]`);
+setup();await import('../dist/app.js?run=1');
+assert.match(query('h1').textContent,/Small steps/);
+click(act('new-goal'));
+fill('#goal-title','Build my customer support automation demo');fill('#goal-success','3 people can submit a request and receive a correct response');fill('#goal-why','Build a useful portfolio sample');fill('#goal-endDate',addDays(today(),55));
+submit('#goal-form');
+fill('#cp-actions-0','Define the support request input\nWrite three realistic sample requests\nChoose the smallest response workflow');submit('#outline-form');
+assert.match(query('.preview-note').textContent,/12 actions across/);click(act('activate-goal'));
+let data=read();assert.equal(data.mode,'personal');assert.equal(data.tasks.length,12);assert.equal(data.goal.title,'Build my customer support automation demo');assert.equal(validateImport(data),true);
+nav('plan');const first=data.tasks[0];click(act('toggle',first.id));assert.equal(read().tasks[0].done,true);assert.equal(read().tasks[0].completedOn,today());
+data=read();setup(data);await import('../dist/app.js?run=2');nav('plan');assert.equal(query(act('toggle',first.id)).getAttribute('aria-pressed'),'true');
+click(act('edit-task',first.id));fill('#task-title','Define the support request input and acceptance criteria');fill('#task-minutes',15);submit('#task-form');assert.equal(read().tasks[0].minutes,15);
+const second=read().tasks[1];click(act('reschedule',second.id));fill('#task-date',addDays(today(),3));submit('#task-form');assert.equal(read().tasks[1].date,addDays(today(),3));
+click(act('add-task'));fill('#task-title','Ask one tester to try the support workflow');fill('#task-minutes',10);submit('#task-form');assert.equal(read().tasks.length,13);
+nav('reflections');
+for(const type of ['weekly','monthly','end']){
+ click(`[data-action="reflection"][data-type="${type}"]`);fill('#reflection-wins',`${type}: The core support workflow is clear and testable.`);fill('#reflection-challenges','I needed smaller actions.');fill('#reflection-lesson','Test one request type before expanding.');
+ if(type==='weekly'){fill('#reflection-next','Test the support flow with a difficult request');fill('#reflection-minutes',10);}
+ submit('#reflection-form');
+}
+data=read();assert.equal(data.reflections.length,3);assert.equal(data.tasks.length,14);assert.equal(document.querySelectorAll('.history-item').length,3);assert.equal(validateImport(data),true);
+const weekly=data.reflections.find(r=>r.type==='weekly');click(act('edit-reflection',weekly.id));fill('#reflection-wins','The core workflow was tested.');query('#reflection-add').checked=true;query('#reflection-add').dispatchEvent(new dom.window.Event('change',{bubbles:true}));fill('#reflection-next','Test the support flow with two difficult requests');submit('#reflection-form');
+data=read();assert.equal(data.reflections.length,3);assert.equal(data.tasks.length,14);assert.equal(data.tasks.find(t=>t.id===weekly.nextTaskId).title,'Test the support flow with two difficult requests');
+setup(data);await import('../dist/app.js?run=3');nav('reflections');assert.equal(document.querySelectorAll('.history-item').length,3);
+click(act('settings'));click(act('export'));assert.equal(exports.length,1);assert.match(exports[0].name,/reflect-ai/);
+const imported={...data,goal:{...data.goal,title:'Restored support automation goal'}};
+Object.defineProperty(query('#import-file'),'files',{configurable:true,value:[{size:5000,text:async()=>JSON.stringify(imported)}]});
+query('#import-file').dispatchEvent(new dom.window.Event('change',{bubbles:true}));await new Promise(resolve=>setImmediate(resolve));assert.match(query('#modal-title').textContent,/Restore this workspace/);click(act('confirm-import'));assert.equal(read().goal.title,imported.goal.title);
+click(act('settings'));const before=localStorage.getItem(storageKey);Object.defineProperty(query('#import-file'),'files',{configurable:true,value:[{size:100,text:async()=>'{"invalid":true}'}]});query('#import-file').dispatchEvent(new dom.window.Event('change',{bubbles:true}));await new Promise(resolve=>setImmediate(resolve));assert.equal(localStorage.getItem(storageKey),before);assert.match(query('#toast').textContent,/not a valid/);
+click(act('close'));nav('today');click(act('timer'));assert.match(query('#timer-button').textContent,/Pause/);click(act('timer'));click(act('timer-reset'));assert.equal(query('#timer-display').textContent,'25:00');
+nav('plan');click(act('new-goal'));fill('#goal-title','Complete one useful task');fill('#goal-success','One task completed');fill('#goal-endDate',today());for(const box of document.querySelectorAll('[name="workday"]'))box.checked=true;submit('#goal-form');submit('#outline-form');assert.match(query('#form-error').textContent,/can fit 1 action/);
+while(document.querySelectorAll('.checkpoint-editor').length>1)click('[data-action="remove-checkpoint"]');fill('#cp-actions-0','Complete the useful task');submit('#outline-form');click(act('activate-goal'));assert.equal(read().tasks.length,1);assert.equal(read().archives.length,1);
+click(act('settings'));click(act('archives'));click('[data-action="restore-goal"][data-index="0"]');assert.equal(read().tasks.length,14);assert.equal(read().reflections.length,3);assert.equal(read().archives.length,1);
+nav('plan');const victim=read().tasks.find(t=>!t.done);click(act('edit-task',victim.id));click(act('delete-task',victim.id));assert.match(query('#modal-title').textContent,/Remove this action/);click(act('confirm-delete',victim.id));assert.equal(read().tasks.length,13);
+const milestone=read().milestones[0];click(act('edit-milestone',milestone.id));fill('#milestone-title','A precise first checkpoint');submit('#milestone-form');assert.equal(read().milestones[0].title,'A precise first checkpoint');
+click(act('new-goal'));fill('#goal-title','<script>alert("x")</script>');fill('#goal-success','A safe text value');fill('#goal-endDate',addDays(today(),55));submit('#goal-form');assert.equal(document.querySelectorAll('#modal script').length,0);click(act('close'));
+assert.equal(validateImport(read()),true);
+console.log('PASS: real application DOM handlers for goal setup, custom outline, activation, complete/undo and persistence, action editing, rescheduling, adding/removing, all three reflections, linked next-step update without duplication, backup export/import, corrupt-backup rejection, focus timer, impossible-plan recovery, goal archiving/restoration, checkpoint editing, and escaped user input.');
+console.log('Browser rendering and owner-private gate verified separately. Native mobile/browser end-to-end test is not executed by this DOM harness.');
+process.exit(0);
